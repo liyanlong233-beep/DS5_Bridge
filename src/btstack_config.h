@@ -10,6 +10,23 @@
 #define ENABLE_CLASSIC
 #endif
 
+#ifndef ENABLE_BLE
+#define ENABLE_BLE
+#endif
+
+#ifndef ENABLE_LE_CENTRAL
+#define ENABLE_LE_CENTRAL
+#endif
+
+#ifndef ENABLE_GATT_CLIENT
+#define ENABLE_GATT_CLIENT
+#endif
+
+#define MAX_NR_GATT_CLIENTS 1
+#define MAX_NR_WHITELIST_ENTRIES 1
+#define MAX_NR_SM_LOOKUP_ENTRIES 3
+#define MAX_NR_LE_DEVICE_DB_ENTRIES 4
+
 
 // CYW43 HCI Transport requires pre-buffer space for packet header
 

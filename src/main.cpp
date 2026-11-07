@@ -28,6 +28,7 @@
 #include "persona/dualsense_persona.h"
 #include "persona/host_persona.h"
 #include "persona/xusb360_usb.h"
+#include "stadia_ble.h"
 #include "runtime_fail_fast.h"
 #include "watchdog_telemetry.h"
 #include "hardware/clocks.h"
@@ -644,6 +645,23 @@ static __attribute__((noinline, noclone)) void __not_in_flash_func(process_contr
 #endif
 }
 
+extern "C" void host_input_submit_controller_state(const BridgeControllerState &controller_state) {
+    critical_section_enter_blocking(&report_cs);
+    interrupt_in_state = controller_state;
+    if (host_input_waiting_for_mount) {
+        report_dirty = true;
+    } else {
+        report_dirty = false;
+        if (
+            !host_input_retry_pending
+            || !host_input_queue.refresh_retry(host_input_retry_state, controller_state)
+        ) {
+            (void)host_input_queue.push(controller_state);
+        }
+    }
+    critical_section_exit(&report_cs);
+}
+
 static void drain_controller_input_batch(bool service_usb) {
     controller_input_receive_batch.drain(process_controller_input_packet, [service_usb] {
         // An edge may go out before the next packet is processed; continuous
@@ -966,6 +984,8 @@ int main() {
 
     bt_init();
     bt_register_data_callback(on_bt_data);
+    stadia_ble_init();
+    stadia_ble_start_scan();
     wake_on_lan_init();
 
     watchdog_enable(1000, true);

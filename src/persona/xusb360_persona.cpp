@@ -4,6 +4,7 @@
 
 #include "controller_output_policy.h"
 #include "dualsense_output.h"
+#include "stadia_ble.h"
 
 namespace {
 
@@ -109,6 +110,7 @@ bool xusb360_persona_decode_output_to_ds5_payload(
 
     const uint8_t strong_left_motor = data[3];
     const uint8_t weak_right_motor = data[4];
+    stadia_ble_send_rumble(strong_left_motor, weak_right_motor);
     std::memset(payload, 0, payload_capacity);
     controller_output_policy_render_classic_rumble_payload(
         payload,

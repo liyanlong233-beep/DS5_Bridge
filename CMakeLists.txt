@@ -140,6 +140,7 @@ add_executable(ds5-bridge
         src/runtime_fail_fast.cpp
         src/watchdog_telemetry.cpp
         src/wake_on_lan.cpp
+        src/stadia_ble.cpp
 )
 
 # Third-party archives follow the firmware's exception/RTTI policy instead of
@@ -725,6 +726,7 @@ target_link_libraries(ds5-bridge
         hardware_timer
         pico_rand
         pico_btstack_classic
+        pico_btstack_ble
         pico_cyw43_arch_poll
         pico_btstack_cyw43
         tinyusb_device

@@ -2,14 +2,22 @@
 
 #include <cstring>
 #include <cstdio>
-#include "btstack.h"
+
+extern "C" {
+#include "btstack_defines.h"
+#include "btstack_event.h"
+#include "gap.h"
+#include "ble/gatt_client.h"
+#include "ble/sm.h"
+}
+
 #include "controller_state.h"
 #include "persona/host_persona.h"
 #include "pico/time.h"
 
-// 声明 main.cpp 提供的输入上报入口
-extern void host_input_submit_controller_state(const BridgeControllerState &controller_state);
-extern void host_input_prepare_persona_switch(void);
+// 声明外部入口
+extern "C" void host_input_submit_controller_state(const BridgeControllerState &controller_state);
+extern "C" void host_input_prepare_persona_switch(void);
 
 namespace {
 
@@ -39,7 +47,6 @@ gatt_client_notification_t notification_listener{};
 btstack_packet_callback_registration_t hci_event_callback_registration{};
 btstack_packet_callback_registration_t sm_event_callback_registration{};
 
-// 震动限频控制（防止高频震动指令拥塞蓝牙信道）
 uint32_t last_rumble_send_time_ms = 0;
 uint8_t last_strong = 0;
 uint8_t last_weak = 0;
@@ -47,7 +54,6 @@ uint8_t last_weak = 0;
 void parse_stadia_input_report(const uint8_t *data, uint16_t len) {
     if (len < 10) return;
 
-    // 若首字节为 Report ID 0x03，偏移 1 字节
     const uint8_t *report = data;
     if (data[0] == 0x03) {
         report = data + 1;
@@ -72,11 +78,10 @@ void parse_stadia_input_report(const uint8_t *data, uint16_t len) {
     s.create   = (buttons & (1 << 9)) != 0; // Back / Options
     s.home     = (buttons & (1 << 10)) != 0; // Stadia / Guide
     
-    // Assistant 键或 Capture 键
     bool assistant = (buttons & (1 << 11)) != 0;
     bool capture   = (buttons & (1 << 12)) != 0;
     if (assistant || capture) {
-        s.home = true; // 快捷唤起 Guide
+        s.home = true;
     }
 
     // D-Pad Hat Switch (report[2])
@@ -90,26 +95,29 @@ void parse_stadia_input_report(const uint8_t *data, uint16_t len) {
         case 5: s.dpad_down = true; s.dpad_left = true; break;
         case 6: s.dpad_left = true; break;
         case 7: s.dpad_up = true; s.dpad_left = true; break;
-        default: break; // 8 居中释放
+        default: break;
     }
 
-    // 摇杆 X/Y (0~255, 中心 128)
+    // 摇杆 X/Y
     s.left_stick_x  = report[3];
     s.left_stick_y  = report[4];
     s.right_stick_x = report[5];
     s.right_stick_y = report[6];
 
-    // 线性扳机 L2 / R2 (0~255)
+    // 线性扳机 L2 / R2
     s.left_trigger  = report[7];
     s.right_trigger = report[8];
     s.l2_pressed    = s.left_trigger > 30;
     s.r2_pressed    = s.right_trigger > 30;
 
-    // 提交到全局输入管道
     host_input_submit_controller_state(s);
 }
 
-void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+} // namespace
+
+extern "C" {
+
+static void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     if (packet_type != HCI_EVENT_PACKET) return;
 
     uint8_t event = hci_event_packet_get_type(packet);
@@ -121,7 +129,7 @@ void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint8_t *pa
         case GATT_EVENT_CHARACTERISTIC_QUERY_RESULT: {
             gatt_client_characteristic_t ch;
             gatt_event_characteristic_query_result_get_characteristic(packet, &ch);
-            if (ch.uuid16 == 0x2A4D) { // Report Characteristic
+            if (ch.uuid16 == 0x2A4D) {
                 if ((ch.properties & ATT_PROPERTY_NOTIFY) != 0) {
                     input_char = ch;
                     has_input_char = true;
@@ -143,13 +151,12 @@ void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint8_t *pa
             } else if (current_state == StadiaState::DiscoveringCharacteristics) {
                 if (status == ERROR_CODE_SUCCESS && has_input_char) {
                     current_state = StadiaState::Subscribing;
-                    // 注册数据监听
                     gatt_client_listen_for_characteristic_value_updates(
                         &notification_listener,
                         handle_gatt_client_event,
-                        stadia_con_handle
+                        stadia_con_handle,
+                        &input_char
                     );
-                    // 订阅 Notification
                     gatt_client_write_client_characteristic_configuration(
                         handle_gatt_client_event,
                         stadia_con_handle,
@@ -159,7 +166,6 @@ void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint8_t *pa
                 }
             } else if (current_state == StadiaState::Subscribing) {
                 current_state = StadiaState::Ready;
-                // 成功就绪！自动激活 Xbox 360 Persona
                 if (host_persona_active() != HostPersonaModeXusb360) {
                     host_persona_set_active(HostPersonaModeXusb360);
                     host_input_prepare_persona_switch();
@@ -178,7 +184,7 @@ void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint8_t *pa
     }
 }
 
-void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     if (packet_type != HCI_EVENT_PACKET) return;
     uint8_t event = hci_event_packet_get_type(packet);
     switch (event) {
@@ -194,7 +200,7 @@ void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
     }
 }
 
-void le_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+static void le_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     if (packet_type != HCI_EVENT_PACKET) return;
     uint8_t event = hci_event_packet_get_type(packet);
 
@@ -208,7 +214,6 @@ void le_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
             uint8_t data_length = gap_event_advertising_report_get_data_length(packet);
             const uint8_t *adv_data = gap_event_advertising_report_get_data(packet);
 
-            // 检查广播数据中是否包含 "Stadia"
             bool found_stadia = false;
             if (data_length >= 6) {
                 for (int i = 0; i <= data_length - 6; ++i) {
@@ -238,16 +243,14 @@ void le_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
                     stadia_con_handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
                     current_state = StadiaState::DiscoveringServices;
 
-                    // 协商极速连接间隔 (7.5ms ~ 10ms)，降低输入延迟
                     gap_request_connection_parameter_update(stadia_con_handle, 6, 8, 0, 400);
 
-                    // 启动 HID 服务查找
                     has_input_char = false;
                     has_output_char = false;
                     gatt_client_discover_primary_services_by_uuid16(
                         handle_gatt_client_event,
                         stadia_con_handle,
-                        0x1812 // HID Service
+                        0x1812
                     );
                 } else {
                     current_state = StadiaState::Idle;
@@ -265,11 +268,9 @@ void le_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
                 has_input_char = false;
                 has_output_char = false;
 
-                // 清空输入并恢复双模扫描
                 BridgeControllerState neutral{};
                 host_input_submit_controller_state(neutral);
 
-                // 重新开启扫描
                 stadia_ble_start_scan();
             }
             break;
@@ -279,10 +280,6 @@ void le_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
             break;
     }
 }
-
-} // namespace
-
-extern "C" {
 
 void stadia_ble_init(void) {
     gatt_client_init();
@@ -303,7 +300,7 @@ void stadia_ble_start_scan(void) {
         return;
     }
     current_state = StadiaState::Scanning;
-    gap_set_scan_parameters(1, 0x0030, 0x0030); // 活跃扫描
+    gap_set_scan_parameters(1, 0x0030, 0x0030);
     gap_start_scan();
 }
 
@@ -324,7 +321,6 @@ void stadia_ble_send_rumble(uint8_t strong, uint8_t weak) {
     }
 
     uint32_t now = to_ms_since_boot(get_absolute_time());
-    // 20ms 限频且只在数值发生变化或心跳刷新时发送
     if (now - last_rumble_send_time_ms < 20 && strong == last_strong && weak == last_weak) {
         return;
     }
@@ -333,8 +329,6 @@ void stadia_ble_send_rumble(uint8_t strong, uint8_t weak) {
     last_strong = strong;
     last_weak = weak;
 
-    // 构造 Stadia BLE 5字节震动报文: [0x05, low_L, low_H, high_L, high_H]
-    // 增加轻微死区增强 (Deadzone Boost)，让微弱震动也能被清晰感知
     uint16_t strong_16 = 0;
     if (strong > 0) {
         strong_16 = static_cast<uint16_t>(strong) << 8 | strong;
@@ -346,7 +340,7 @@ void stadia_ble_send_rumble(uint8_t strong, uint8_t weak) {
     }
 
     uint8_t payload[5];
-    payload[0] = 0x05; // Report ID
+    payload[0] = 0x05;
     payload[1] = static_cast<uint8_t>(strong_16 & 0xFF);
     payload[2] = static_cast<uint8_t>((strong_16 >> 8) & 0xFF);
     payload[3] = static_cast<uint8_t>(weak_16 & 0xFF);
